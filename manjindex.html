@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>DeviceMotion Rate Tester</title>
+<style>
+  :root{
+    --bg:#0b1220; --card:#0f1724; --muted:#9aa4b2; --accent:#60a5fa; --text:#e6eef6;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;
+    background:linear-gradient(180deg,#071022 0%, #0b1220 100%);
+    color:var(--text);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:100vh;
+    padding:20px;
+  }
+  .card{
+    width:min(760px,96%);
+    background:linear-gradient(180deg, rgba(255,255,255,0.02), var(--card));
+    padding:20px;
+    border-radius:12px;
+    box-shadow:0 10px 30px rgba(0,0,0,0.6);
+  }
+  h1{margin:0 0 10px;font-size:1.2rem}
+  p {color:var(--muted);margin:0 0 12px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  button{
+    background:transparent;border:1px solid rgba(255,255,255,0.06);
+    color:var(--text);padding:10px 12px;border-radius:8px;cursor:pointer;
+  }
+  button.primary{border-color:var(--accent);box-shadow:0 6px 18px rgba(96,165,250,0.08)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:14px}
+  .stat{
+    background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;text-align:center;
+  }
+  .stat .label{color:var(--muted);font-size:0.85rem}
+  .stat .value{font-weight:700;font-size:1.3rem;margin-top:6px}
+  canvas{width:100%;height:80px;border-radius:8px;background:linear-gradient(180deg,#06101a, #08121a);display:block}
+  .note{font-size:0.85rem;color:var(--muted);margin-top:12px}
+  a {color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>DeviceMotion Rate Tester</h1>
+    <p>Shows how fast your browser is sending <code>devicemotion</code> events (events per second, intervals, and a small live graph).</p>
+
+    <div class="controls">
+      <button id="btn-perm" class="primary">Request Motion Permission</button>
+      <button id="btn-start">Start Listening</button>
+      <button id="btn-stop">Stop</button>
+      <button id="btn-reset">Reset</button>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="label">Events / sec (instant)</div>
+        <div id="eps" class="value">—</div>
+      </div>
+
+      <div class="stat">
+        <div class="label">Average interval (ms)</div>
+        <div id="avg-interval" class="value">—</div>
+      </div>
+
+      <div class="stat">
+        <div class="label">Last interval (ms)</div>
+        <div id="last-interval" class="value">—</div>
+      </div>
+
+      <div class="stat">
+        <div class="label">Total events</div>
+        <div id="total" class="value">0</div>
+      </div>
+    </div>
+
+    <canvas id="chart" width="800" height="120" aria-label="event rate chart"></canvas>
+
+    <p class="note">
+      Notes: Most desktop browsers do not emit device motion events. On iOS 13+ you must explicitly grant permission; press <strong>Request Motion Permission</strong> first. Try moving or rotating the device to see events.
+    </p>
+
+    <p class="note">Repo: <a href="https://chaicode.com/" target="_blank" rel="noopener">ChaiCode example</a></p>
+  </div>
+
+<script>
+(() => {
+  // DOM
+  const btnPerm = document.getElementById('btn-perm');
+  const btnStart = document.getElementById('btn-start');
+  const btnStop = document.getElementById('btn-stop');
+  const btnReset = document.getElementById('btn-reset');
+  const epsEl = document.getElementById('eps');
+  const avgEl = document.getElementById('avg-interval');
+  const lastEl = document.getElementById('last-interval');
+  const totalEl = document.getElementById('total');
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+
+  // State
+  let listening = false;
+  let eventCount = 0;
+  let lastTs = null;
+  let intervals = []; // ms
+  const MAX_SAMPLES = 120;
+  let timestamps = []; // recent timestamps for instantaneous EPS
+
+  // Helpers
+  function msToFixed(n){ return (Math.round(n*10)/10).toFixed(1); }
+
+  // Permission flow for iOS Safari
+  async function requestPermission() {
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const resp = await DeviceMotionEvent.requestPermission();
+        if (resp === 'granted') {
+          alert('Motion permission granted. Now press "Start Listening".');
+        } else {
+          alert('Motion permission denied.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Permission request failed: ' + err);
+      }
+    } else {
+      alert('No permission prompt required (or not supported). Try "Start Listening".');
+    }
+  }
+
+  function onDeviceMotion(e) {
+    const t = performance.now(); // high-res timestamp
+    eventCount++;
+    totalEl.textContent = eventCount;
+
+    if (lastTs !== null) {
+      const interval = t - lastTs;
+      intervals.push(interval);
+      if (intervals.length > MAX_SAMPLES) intervals.shift();
+      lastEl.textContent = msToFixed(interval);
+    }
+    lastTs = t;
+
+    // keep recent timestamps for instant EPS (1s window)
+    timestamps.push(t);
+    // drop timestamps older than 1s
+    const cutoff = t - 1000;
+    while (timestamps.length && timestamps[0] < cutoff) timestamps.shift();
+    const eps = timestamps.length;
+    epsEl.textContent = eps;
+
+    // average interval over stored intervals
+    if (intervals.length) {
+      const sum = intervals.reduce((a,b)=>a+b,0);
+      const avg = sum / intervals.length;
+      avgEl.textContent = msToFixed(avg);
+    } else {
+      avgEl.textContent = '—';
+    }
+
+    drawChart();
+  }
+
+  function startListening() {
+    if (listening) return;
+    // Some browsers require the handler to be passive: false if you want preventDefault (not needed here)
+    window.addEventListener('devicemotion', onDeviceMotion);
+    listening = true;
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  }
+
+  function stopListening() {
+    if (!listening) return;
+    window.removeEventListener('devicemotion', onDeviceMotion);
+    listening = false;
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  }
+
+  function reset() {
+    stopListening();
+    eventCount = 0;
+    lastTs = null;
+    intervals = [];
+    timestamps = [];
+    epsEl.textContent = '—';
+    avgEl.textContent = '—';
+    lastEl.textContent = '—';
+    totalEl.textContent = '0';
+    clearChart();
+  }
+
+  // Chart drawing (simple sparkline for events per frame calculated from intervals)
+  function drawChart(){
+    // compute samples: convert intervals[] to EPS-like values (1000 / interval)
+    const samples = intervals.map(i => 1000 / i);
+    // pad to length
+    const len = MAX_SAMPLES;
+    const padded = Array(Math.max(0, len - samples.length)).fill(0).concat(samples);
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0,0,w,h);
+
+    // background gradient
+    const g = ctx.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,'rgba(96,165,250,0.08)');
+    g.addColorStop(1,'rgba(6,8,12,0.02)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,w,h);
+
+    // find max for scaling (or use fallback)
+    const max = Math.max(5, ...padded);
+    // draw line
+    ctx.beginPath();
+    padded.forEach((v,i) => {
+      const x = (i / (padded.length-1)) * w;
+      const y = h - ((v / max) * (h - 8) + 4);
+      if (i === 0) ctx.moveTo(x,y);
+      else ctx.lineTo(x,y);
+    });
+    ctx.strokeStyle = 'rgba(96,165,250,0.95)';
+    ctx.lineWidth = 2.0;
+    ctx.stroke();
+
+    // fill under curve
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(96,165,250,0.08)';
+    ctx.fill();
+
+    // draw current EPS text small
+    ctx.fillStyle = 'rgba(230,238,246,0.9)';
+    ctx.font = '12px Inter, Arial';
+    const current = padded[padded.length-1] ? padded[padded.length-1].toFixed(1) : '0.0';
+    ctx.fillText('EPS (recent): ' + current, 8, 14);
+  }
+
+  function clearChart(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+  }
+
+  // Attach events
+  btnPerm.addEventListener('click', requestPermission);
+  btnStart.addEventListener('click', startListening);
+  btnStop.addEventListener('click', stopListening);
+  btnReset.addEventListener('click', reset);
+
+  // initial state
+  btnStop.disabled = true;
+  clearChart();
+
+  // Helpful UX: if devicemotion events were active in the past, offer auto-start on load (commented out)
+  // startListening();
+
+  // Minor: handle page visibility to pause chart updates if needed (not strictly necessary)
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      // optionally pause chart updates or logging
+    }
+  });
+})();
+</script>
+</body>
+</html>
